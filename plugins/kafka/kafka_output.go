@@ -56,6 +56,7 @@ type KafkaOutputConfig struct {
 	HashVariable  string `toml:"hash_variable"`  // HashPartitioner key is extracted from a message variable
 	TopicVariable string `toml:"topic_variable"` // Topic extracted from a message variable
 	Topic         string // Static topic
+	TopicPrefix   string `toml:"topic_prefix"` // String to be prepended to the topic
 
 	RequiredAcks               string `toml:"required_acks"` // NoResponse, WaitForLocal, WaitForAll
 	Timeout                    uint32
@@ -352,6 +353,7 @@ func (k *KafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (er
 	var (
 		pack  *pipeline.PipelinePack
 		topic = k.config.Topic
+		prefix = k.config.TopicPrefix
 		key   sarama.Encoder
 	)
 
@@ -381,7 +383,7 @@ func (k *KafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (er
 			continue
 		}
 		pMessage := &sarama.ProducerMessage{
-			Topic: topic,
+			Topic: topicEscape(prefix+topic),
 			Key:   key,
 			Value: sarama.ByteEncoder(msgBytes),
 		}
@@ -410,6 +412,53 @@ func (k *KafkaOutput) ReportMsg(msg *message.Message) error {
 
 func (k *KafkaOutput) CleanupForRestart() {
 	return
+}
+
+// Escapes a topic name by encoding any non-valid kafka topic name
+func topicEscape(s string) string {
+	hexCount := 0
+	for i := 0; i < len(s); i++ {
+		if shouldEscape(s[i]) {
+			hexCount++
+		}
+	}
+
+	if hexCount == 0 {
+		return s
+	}
+
+	t := make([]byte, len(s)+2*hexCount)
+	j := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if shouldEscape(c) {
+			t[j] = '-'
+			t[j+1] = "0123456789ABCDEF"[c>>4]
+			t[j+2] = "0123456789ABCDEF"[c&15]
+			j += 3
+		} else {
+			t[j] = s[i]
+			j++
+		}
+	}
+	return string(t)
+}
+
+func shouldEscape(c byte) bool {
+	// List of valid kafka topic characters can be found at:
+	// https://github.com/apache/kafka/blob/43b92f8b1ce8140c432edf11b0c842f5fbe04120/core/src/main/scala/kafka/common/Topic.scala#L25
+	//   val legalChars = "[a-zA-Z0-9\\._\\-]"
+	if 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' {
+		return false
+	}
+
+	switch c {
+	case '.', '_', '-':
+		return false
+	}
+
+	// Everything else must be escaped.
+	return true
 }
 
 func init() {
